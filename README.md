@@ -9,7 +9,7 @@
 *	Goto Tools->Boards:->Boards Manager...
 	Search "esp32", install latest version of "esp32 by espressif systems"
 
-*	Then File->Open... and open ".ino" file
+*	Then File->Open... and open ".ino" file from examples folder
 
 *	Insert "Manges Mojäng" in USB port while keeping button pressed (=Enter FW-Download mode). 
 	Once inserted, release button

@@ -6,9 +6,13 @@ On board: SoC: ESP32-C3, 1st Green LED, 1st Button (sampled during boot up for s
 
 Output modes: Current output 20mA/40mA (Typically ~2-3V)*
 
-Power In: 5V via USB Typ-A
+Power In: 3.5V-5.5V via USB Typ-A
 
-Sleep Current: ~7uA
+Sleep Current: ~7uA from VBUS
+
+Active current: WiFi ~80mA from VBUS + ~15mA when Light output is on.
+
+Battery/Powerbank duration will heavely depend on how often/long the light is on. Secondly how often the device interacts over wifi, and for how long.
 
 *) The output is designed to be a current output and not a voltage output. Hense, the light intensity of a LED is proportional to the current, not the voltage.
 

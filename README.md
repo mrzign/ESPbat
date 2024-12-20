@@ -1,5 +1,5 @@
 # ESP32 Decor String Light Controller
-
+![](https://github.com/mrzign/ESPbat/blob/main/resources/image.png)
 ## Get started
 * Download Arduino IDE 2.3.x, https://www.arduino.cc/en/software
 

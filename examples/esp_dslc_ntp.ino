@@ -103,24 +103,24 @@ void setup() {
   digitalWrite(LED, LOW); //Indicate alive...
 
 #ifndef DEBUG
-      //This is done to wake Powerbanks and control if the charging works (when using pbalive-dongle)
-      pinMode(PBWAKE, INPUT_PULLUP);
-      int chargingDetect = digitalRead(PBWAKE);
-      pinMode(PBWAKE, INPUT_PULLDOWN);
-      // if(chargingDetect == 1) {
-      //   //No charging detected
-      //   ledblink[0] = 0;
-      //   ledblink[1] = 1;
-      //   ledblink[2] = 0;
-      //   ledblink[3] = 1;
-      //   ledblink[4] = 0;
-      //   ledblink[5] = 1;
-      //   ledblink[6] = 0;
-      //   ledblink[7] = 1;
-      //   led_blink_ms = 100; //Even faster blink  
-      //   blinkLed = true;
-      //   max_runtime_ms = 20000;        
-      // }
+  //This is done to wake Powerbanks and control if the charging works (when using pbalive-dongle)
+  pinMode(PBWAKE, INPUT_PULLUP);
+  int chargingDetect = digitalRead(PBWAKE);
+  pinMode(PBWAKE, INPUT_PULLDOWN);
+  // if(chargingDetect == 1) {
+  //   //No charging detected
+  //   ledblink[0] = 0;
+  //   ledblink[1] = 1;
+  //   ledblink[2] = 0;
+  //   ledblink[3] = 1;
+  //   ledblink[4] = 0;
+  //   ledblink[5] = 1;
+  //   ledblink[6] = 0;
+  //   ledblink[7] = 1;
+  //   led_blink_ms = 100; //Even faster blink  
+  //   blinkLed = true;
+  //   max_runtime_ms = 20000;        
+  // }
 #endif
 
 

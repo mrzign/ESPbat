@@ -16,7 +16,24 @@ Battery/Powerbank duration will heavely depend on how often/long the light is on
 
 *) The output is designed to be a current output and not a voltage output. Hense, the light intensity of a LED is proportional to the current, not the voltage.
 
-## Get started
+## Get started - Easy way
+
+* 	Download binary file from firmware folder
+  
+*	Goto https://espressif.github.io/esptool-js/
+
+* 	Insert "Manges Mojäng" in USB port while keeping button pressed (=Enter FW-Download mode). 
+	Once inserted, release button
+
+*	Click on "Connect" and choose "USB JTAG/serial debug unit"
+
+*	Edit Flash Address to "0x0" and click button to choose binary file you downloaded
+
+*	Click "Program"
+
+*	Done. Plug it in to a battery package/USB power and configure the device through the Access Point that appears
+
+## Get started - FW development
 * Download Arduino IDE 2.3.x, https://www.arduino.cc/en/software
 
 * Once installed, goto File->Preferences...

@@ -2,23 +2,31 @@
 FW for "Manges Mojäng" ESP32 Decor String Light Controller (esp_dslc)
 
 Variant: MQTT
-Requires: Home Assistant, MQTT Broker (Mosquitto), Automation in Home Assistant that triggers on MQTT Received message, Static IP (preferably)
-Version: 0.1
+Requires: Home Assistant, MQTT Broker (Mosquitto), Automation in Home Assistant that triggers on MQTT Received message
+Version: 0.2
 
 ***Concept***
 Wakes up each 10 min and connects to MQTT Broker to receive on/off decision
 
 ***At cold start/first boot***
-At cold start, output is default ON and Button toggles between 15/30mA output.
-Goes to sleep after 30s of button inactivity. 
+If no wifi credentials has been stored, the device boots up as an Access Point (esp_dslc_XXXX)
+Connect to it and configure wifi and MQTT settings.
+Once saved and device successfully connects to wifi, the AP should disappear.
+
+At cold start, if WiFi have been stored, a short press on the button within 5s will force the Access Point
+to become available for change in config. A long press(>5s) within 5s from cold start will clear wifi settings
+and the Access Point will become available.
+
+If button is not pressed within 5s from cold start, the LED will blink and the output will turn ON and Button 
+toggles between 15/30mA output. It goes to sleep after 30s of button inactivity. 
+
 Turns off output if no connection to wifi/mqtt occured, or received "off" state from mqtt.
 
 ***At wake up***
 Connects to WiFi, then MQTT broker, take actions (on/off), then go to Sleep
 
-MQTT Publish topic "esp_dslc_XXXX/online" where XXXX is two last bytes in MAC adress (use to trigger automation in HA)
-MQTT Subscribe topic "esp_dslc/output"
-
+MQTT Publish Status topic "esp_dslc_XXXX/online" where XXXX is two last bytes in MAC adress (use to trigger automation in HA)
+MQTT Subscribe Output topic "esp_dslc/output"
 
 NOTE: 
 DEBUG is defined per default in this version to be able to retrieve MAC adress and see that everything works.
@@ -54,38 +62,20 @@ In Home Assistant:
 */
 
 
-#include <WiFi.h>
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 #include <PubSubClient.h>  //PubSubClient by Nick O'Leary
-#include <EEPROM.h>
 #include "driver/gpio.h"
-
-//##################### SETTINGS ######################
-
-// WiFi credentials
-const char *ssid = "YOUR_WIFI_SSID";
-const char *password = "YOUR_WIFI_PWD";
-
-// Set your Static IP address (shorter time awake compared to DHCP)
-IPAddress local_IP(192, 168, 1, XX); //Static IP of this unique device
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 255, 0);
-
-// MQTT Broker adress and credentials
-const char *mqtt_broker = "homeassistant.local";
-const char *mqtt_username = "username";
-const char *mqtt_password = "userpwd";
-const int mqtt_port = 1883;
-const String output_topic = "esp_dslc/output";
+#include "Preferences.h"
 
 //##################### DEBUG ######################
 // Make sure "USB CDC On Boot" is Enabled if DEBUG is defined.
 // DEBUG mode will not work with power banks
 
-#define DEBUG   
+// #define DEBUG   
 
 //###################################################
 
-const unsigned long sleeptime_us = 10*60*1000*1000; //(10 min)
+const uint8_t sleeptime_m = 10; //(10 min)
 const unsigned long button_exit_time_ms = 30000;    //Timeout after last button press at cold start
 const unsigned long max_runtime_ms = 5000;          //If no message from MQTT within 5s, go to DeepSleep after 5s
 
@@ -99,29 +89,48 @@ const unsigned long max_runtime_ms = 5000;          //If no message from MQTT wi
 #define PBWAKE   19 //USB D+ wake up Powerbank and sense charging state (Not used if DEBUG defined)
 #endif
 
-// EEPROM
-#define EEPROMsize 1
+#define uS_TO_S_FACTOR 1000000ULL
 
 // RTC Fast Memory Variables (Retained during Deep Sleep)
-RTC_DATA_ATTR bool cold_start = true; //Initial value is true to detect cold start.
-//RTC_DATA_ATTR int wake_count = -1;
+RTC_DATA_ATTR char mqtt_broker[40] = "homeassistant.local";
+RTC_DATA_ATTR char mqtt_username[20] = "username";
+RTC_DATA_ATTR char mqtt_password[20] = "userpwd";
+RTC_DATA_ATTR uint16_t mqtt_port = 1883;
+RTC_DATA_ATTR char mqtt_topic[40] = "esp_dslc/output";
+RTC_DATA_ATTR char mqtt_status_topic[40] = "esp_dslc_XXXX/status";
+
 
 //Variables
+bool cold_start = false;
 bool goToDeepSleep = false;
 bool currentSetModeActive = false;
 bool blinkLed = false;
 bool receivedMsg = false;
-unsigned char ledblink[8] = {0,1,1,1,1,1,1,1};
-unsigned char ledptr = 0;
-unsigned char currentMode = 0;
-unsigned int timeout = 0;
-unsigned int newButtonState = HIGH;
-unsigned long startMillis = 0;
-unsigned long currentMillis = 0;
-unsigned long timeMillis = 0;
-unsigned long buttonReleaseMillis = 0;
-unsigned long led_blink_ms = 250; //Fast blink
-
+bool force_AP_mode = false;
+bool active_AP_mode = false;
+bool wait_for_config = false;
+uint8_t boot_up_reason = 0;
+uint8_t ledblink[8] = {0,1,1,1,1,1,1,1};
+uint8_t ledptr = 0;
+uint8_t currentMode = 0;
+uint16_t timeout = 0;
+uint16_t newButtonState = HIGH;
+uint32_t startMillis = 0;
+uint32_t currentMillis = 0;
+uint32_t timeMillis = 0;
+uint32_t buttonReleaseMillis = 0;
+uint32_t led_blink_ms = 250; //Fast blink
+String newHostname; 
+WiFiManager wm; // global wm instance
+WiFiManagerParameter custom_mqtt_broker;
+WiFiManagerParameter custom_mqtt_username;
+WiFiManagerParameter custom_mqtt_password;
+WiFiManagerParameter custom_mqtt_topic;
+WiFiManagerParameter custom_mqtt_port;
+WiFiManagerParameter custom_mqtt_status_topic;
+WiFiManagerParameter custom_mac;
+char wm_mac[40];
+Preferences nvmPrefs;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -159,109 +168,246 @@ void setup() {
   // }
 #endif
 
+  boot_up_reason = esp_rom_get_reset_reason(0);
 
-  //Things done only at cold start, e.g. read previous currentMode
-  if(cold_start) {
-    EEPROM.begin(EEPROMsize);
-    currentMode = EEPROM.read(0);
-    //If not a valid currentMode, or never been set
-    if(currentMode > 1) {
-      currentMode=0;
-      EEPROM.write(0, currentMode);
-      EEPROM.commit();
-    }
-    setCurrent(currentMode);
-  }
-
-  //All other things done every WakeUp 
 #ifdef DEBUG
-  // Set software serial baud to 115200;
   Serial.begin(115200);
   Serial.println("");
-  Serial.println("I'm alive");
 #endif
+
+#ifdef DEBUG
+  Serial.print("Boot up reason: ");
+  Serial.print(boot_up_reason + " - ");
+  if(boot_up_reason == 1) {
+    Serial.println("Cold Start");
+  } else if (boot_up_reason == 5) {
+    Serial.println("Deep Sleep");
+  } else if (boot_up_reason == 12) {
+    Serial.println("Reset");
+  } else {
+    Serial.println("Unknown");
+  }
+#endif
+
   WiFi.mode(WIFI_STA);
-  String newHostname = "esp_dslc_";
+  newHostname = "esp_dslc_";
   newHostname += String(WiFi.macAddress())[12];
   newHostname += String(WiFi.macAddress())[13];
   newHostname += String(WiFi.macAddress())[15];
   newHostname += String(WiFi.macAddress())[16];
   WiFi.setHostname(newHostname.c_str());
-  if (!WiFi.config(local_IP, gateway, subnet)) {
+
+  if(boot_up_reason == 1) {
+    cold_start = true;
 #ifdef DEBUG
-    Serial.println("STA Failed to configure");
+    Serial.println("Cold Boot detected. Waiting for button press...");
 #endif
+    bool done = false;
+    uint16_t runtime = 400; //10s
+    uint16_t buttonpress = 0;
+    while (runtime > 0 && !done) {
+      if(digitalRead(BUTTON) == LOW) {
+        delay(25); //Debounce
+        if(digitalRead(BUTTON) == LOW) {
+          buttonpress++;
+        }
+      } else {
+        delay(25); //Debounce
+        if(digitalRead(BUTTON) == HIGH && buttonpress > 2) {
+          done = true;  //button released after beeing pressed > 50ms
+        }
+      }
+      runtime--;
+      if(runtime < 200 && buttonpress < 2) done = true; //If not pressed within 5s
+      if(buttonpress > 200) done = true; //Pressed for more than 5s
+    }
+    if(buttonpress > 200) {
+      //Button Long pressed for 5s within 5s from cold boot = clear all settings
+#ifdef DEBUG
+      Serial.println("Long press");
+      Serial.println("Erasing Config, restarting");
+#endif
+      wm.resetSettings();
+      // nvmPrefs.begin("thePrefs", false);
+      // nvm.clear();
+      // nvmPrefs.end();
+      for(int i = 0; i < 15; i++) {
+        digitalWrite(LED, !digitalRead(LED));
+        delay(200);
+      }
+      ESP.restart();
+    } else if (buttonpress > 2 && wm.getWiFiIsSaved()) {
+      //Button short pressed within 5s from cold boot = flag for start AP for Config
+#ifdef DEBUG
+      Serial.println("Short press");
+      Serial.println("Starting config portal after connection");
+#endif
+      force_AP_mode = true;
+    }
   }
-  // connecting to a WiFi network
+
+  //Things done only at cold start or reset, e.g. read previous currentMode
+  if(boot_up_reason == 1 || boot_up_reason == 12) {
+    nvmPrefs.begin("thePrefs", false);
+    if(nvmPrefs.isKey("currentMode")) {
+      currentMode = nvmPrefs.getUChar("currentMode");
+    } else {
+      nvmPrefs.putUChar("currentMode", 0);
+    }
+    if(nvmPrefs.isKey("mqtt_broker")) {
+      strcpy(mqtt_broker, nvmPrefs.getString("mqtt_broker", mqtt_broker).c_str());
+    } else {
+      nvmPrefs.putString("mqtt_broker", mqtt_broker);
+    }
+    if(nvmPrefs.isKey("mqtt_username")) {
+      strcpy(mqtt_username, nvmPrefs.getString("mqtt_username", mqtt_username).c_str());
+    } else {
+      nvmPrefs.putString("mqtt_username", mqtt_username);
+    }
+    if(nvmPrefs.isKey("mqtt_password")) {
+      strcpy(mqtt_password, nvmPrefs.getString("mqtt_password", mqtt_password).c_str());
+    } else {
+      nvmPrefs.putString("mqtt_password", mqtt_password);
+    }
+    if(nvmPrefs.isKey("mqtt_topic")) {
+      strcpy(mqtt_topic, nvmPrefs.getString("mqtt_topic", mqtt_topic).c_str());
+    } else {
+      nvmPrefs.putString("mqtt_topic", mqtt_topic);
+    }
+    if(nvmPrefs.isKey("mqtt_status_topic")) {
+      strcpy(mqtt_status_topic, nvmPrefs.getString("mqtt_status_topic", mqtt_status_topic).c_str());
+    } else {
+      nvmPrefs.putString("mqtt_status_topic", (newHostname + "/status"));
+      strcpy(mqtt_status_topic, (newHostname + "/status").c_str());
+    }
+    if(nvmPrefs.isKey("mqtt_port")) {
+      mqtt_port = nvmPrefs.getUShort("mqtt_port", mqtt_port);
+    } else {
+      nvmPrefs.putUShort("mqtt_port", mqtt_port);
+    }
+    if(currentMode > 1) {
+      currentMode=0;
+      nvmPrefs.putUChar("currentMode", currentMode);
+    }
+    nvmPrefs.end();
+    setCurrent(currentMode);
+  }
+
+  wm.setConfigPortalBlocking(false);
+
+  new (&custom_mqtt_broker) WiFiManagerParameter("broker", "MQTT Broker", mqtt_broker, 40);
+  new (&custom_mqtt_port) WiFiManagerParameter("port", "MQTT Port", String(mqtt_port).c_str(), 6);
+  new (&custom_mqtt_username) WiFiManagerParameter("username", "MQTT Username", mqtt_username, 20);
+  new (&custom_mqtt_password) WiFiManagerParameter("password", "MQTT Password", mqtt_password, 20);
+  new (&custom_mqtt_topic) WiFiManagerParameter("topic", "MQTT Output Topic", mqtt_topic, 40);
+  new (&custom_mqtt_status_topic) WiFiManagerParameter("topic", "MQTT Status Topic", mqtt_status_topic, 40);
+
+  wm.addParameter(&custom_mqtt_broker);
+  wm.addParameter(&custom_mqtt_port);
+  wm.addParameter(&custom_mqtt_username);
+  wm.addParameter(&custom_mqtt_password);
+  wm.addParameter(&custom_mqtt_topic);
+  wm.addParameter(&custom_mqtt_status_topic);
+  sprintf(wm_mac, "<hr><br>MAC: %s</br><br>", WiFi.macAddress().c_str());
+  new (&custom_mac) WiFiManagerParameter(wm_mac);
+  wm.addParameter(&custom_mac);
+
+
+  wm.setSaveParamsCallback(saveParamCallback);
+  wm.setSaveConfigCallback(saveConfigCallback);
+  wm.setConfigPortalTimeoutCallback(configPortalTimeoutCallback);
+
+  std::vector<const char *> menu = {"wifi","sep","restart","exit"};
+  wm.setMenu(menu);
+
+  wm.setClass("invert");
+
+  wm.setConnectTimeout(5); // how long to try to connect for before continuing
+  wm.setSaveConnectTimeout(5);
+  wm.setConfigPortalTimeout(120); // auto close configportal after n seconds
+  wm.setAPClientCheck(true); // avoid timeout if client connected to softap
+
+  //If WiFi credentials saved, skip AP if WiFi connection failed
+  if(wm.getWiFiIsSaved() && !force_AP_mode) {
+    wm.setEnableConfigPortal(false);
+#ifdef DEBUG
+    Serial.println("WiFi Stored, disable auto-AP");
+#endif
+  } else {
+    wm.setEnableConfigPortal(true);
+  }
+
 #ifdef DEBUG
   Serial.print("MAC address: ");
   Serial.println(WiFi.macAddress());
-  Serial.println("Connecting to WiFi..");
 #endif
-  WiFi.begin(ssid, password);
-  if(!WiFi.getAutoReconnect()) {
-    WiFi.setAutoReconnect(true);
-  }
-  timeout = 20; //Timeout if not connected in 20*0.25s delay=5s
-  while ((WiFi.status() != WL_CONNECTED) && (timeout > 0)) {
-      delay(250);
-      timeout--;
-  }
-  if(timeout == 0){
+  wm.setTitle("ESP Decor String Light Controller");
+  bool res;
+  res = wm.autoConnect(newHostname.c_str());
+
+  if(!res) {
+    if(wm.getConfigPortalActive() == 1) {
+      active_AP_mode = true;
+    } else {
 #ifdef DEBUG
-    Serial.println("Failed connecting to the WiFi network!");
+      Serial.println("Failed connecting to WiFi!");
 #endif
-    goToDeepSleep = true;
+    }
   } else {
 #ifdef DEBUG
-    Serial.println("Connected to the WiFi network");
+    Serial.println("Connected to WiFi");
+    Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
+    Serial.print("Hostname: ");
     Serial.println(newHostname.c_str());  
 #endif
-      //connecting to a mqtt broker
-    client.setServer(mqtt_broker, mqtt_port);
-    client.setCallback(callback);
-    timeout = 2; ////Timeout if not connected in 2*3s delay=6s
-    String client_id = "esp32c3-";
-    client_id += "dslc-";
-    client_id += String(WiFi.macAddress());
-    while (!client.connected() && timeout > 0 && WiFi.status() == WL_CONNECTED) {
-#ifdef DEBUG
-      Serial.printf("The client %s connects to the mqtt broker", client_id.c_str());
-      Serial.println("");
-#endif
-      if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
-#ifdef DEBUG
-        Serial.println("mqtt broker connected");
-#endif
-      } else {
-#ifdef DEBUG
-        Serial.print("failed with state ");
-        Serial.println(client.state());
-#endif
-        timeout--;
-        delay(3000);
+    if(!force_AP_mode) {    
+      client.setServer(mqtt_broker, mqtt_port);
+      client.setCallback(callback);
+      String client_id = "esp32c3-";
+      client_id += "dslc-";
+      client_id += String(WiFi.macAddress());
+      timeout = 2; ////Timeout if not connected in 2*3s delay=6s
+      while (!client.connected() && timeout > 0) {
+  #ifdef DEBUG
+        Serial.printf("The client %s connects to the mqtt broker", client_id.c_str());
+        Serial.println("");
+  #endif
+        if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
+  #ifdef DEBUG
+          Serial.println("mqtt broker connected");
+  #endif
+        } else {
+  #ifdef DEBUG
+          Serial.print("failed with state ");
+          Serial.println(client.state());
+  #endif
+          timeout--;
+          delay(3000);
+        }
+        client.loop();
       }
-      client.loop();
+      // publish and subscribe at MQTT Broker if connected
+      if (client.state() == 0) {
+        client.publish(mqtt_status_topic, "online");
+        client.loop();
+        client.subscribe(mqtt_topic,1);
+        client.loop();
+        //delay(100);
+      } else {
+  #ifdef DEBUG
+        Serial.println("failed connecting to mqtt server");
+  #endif
+        goToDeepSleep = true;
+      }
     }
   }
-  
-  // publish and subscribe at MQTT Broker if connected
-  if (client.state() == 0) {
-    client.publish((newHostname + "/status").c_str(), "online");
-    client.loop();
-    client.subscribe(output_topic.c_str(),1);
-    client.loop();
-    //delay(100);
-  } else {
-#ifdef DEBUG
-    Serial.println("failed connecting to mqtt server");
-#endif
-    goToDeepSleep = true;
-  }
 
+
+  // Get some uptime timestamps initialized
   startMillis = millis();  //initial start time
   timeMillis = startMillis;
+
 }
 
 //MQTT callback. Runs when received a message from Broker
@@ -277,18 +423,23 @@ void callback(char *topic, byte *payload, unsigned int length) {
   Serial.println("-----------------------");
 #endif
  
-  if ( topic_str == output_topic && message == "on") {
+  if ( topic_str == mqtt_topic && message == "on") {
     turnON();
     goToDeepSleep = true;
   }
-  if ( topic_str == output_topic && message == "off") {   
+  if ( topic_str == mqtt_topic && message == "off") {   
     turnOFF();  
     goToDeepSleep = true;
   }
   if (goToDeepSleep) {
     receivedMsg = true;
     client.disconnect();
-    WiFi.disconnect();
+    wm.disconnect();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+#ifdef DEBUG
+    Serial.println("Disconnected from WiFi");
+#endif
   }
 }
 
@@ -334,6 +485,61 @@ void setCurrent(unsigned char mode) {
 #endif
 }
 
+String getParam(String name){
+  //read parameter from server, for customhmtl input
+  String value;
+  if(wm.server->hasArg(name)) {
+    value = wm.server->arg(name);
+  }
+  return value;
+}
+
+void saveParamCallback(){
+  strcpy(mqtt_broker, custom_mqtt_broker.getValue());
+  mqtt_port = atoi(custom_mqtt_port.getValue());
+  strcpy(mqtt_username, custom_mqtt_username.getValue());
+  strcpy(mqtt_password, custom_mqtt_password.getValue());
+  strcpy(mqtt_topic, custom_mqtt_topic.getValue());
+  strcpy(mqtt_status_topic, custom_mqtt_status_topic.getValue());
+#ifdef DEBUG
+  Serial.println("[CALLBACK] saveParamCallback fired");
+  Serial.println("PARAM MQTT Broker = " + String(mqtt_broker));
+  Serial.println("PARAM MQTT Port = " + String(mqtt_port));
+  Serial.println("PARAM MQTT Username = " + String(mqtt_username));
+  Serial.println("PARAM MQTT Password = " + String(mqtt_password));
+  Serial.println("PARAM MQTT Output Topic = " + String(mqtt_topic));
+  Serial.println("PARAM MQTT Status Topic = " + String(mqtt_status_topic));
+#endif
+
+  nvmPrefs.begin("thePrefs", false);
+  nvmPrefs.putString("mqtt_broker", mqtt_broker);
+  nvmPrefs.putUShort("mqtt_port", mqtt_port);
+  nvmPrefs.putString("mqtt_username", mqtt_username);
+  nvmPrefs.putString("mqtt_password", mqtt_password);
+  nvmPrefs.putString("mqtt_topic", mqtt_topic);
+  nvmPrefs.putString("mqtt_status_topic", mqtt_status_topic);
+  nvmPrefs.end();
+  if(wait_for_config) {
+    wait_for_config = false;
+    wm.setAPClientCheck(false);
+    wm.setConfigPortalTimeout(1);
+  }
+}
+
+void saveConfigCallback() {
+#ifdef DEBUG
+  Serial.println("[CALLBACK] saveConfigCallback fired");
+#endif
+}
+
+void configPortalTimeoutCallback() {
+#ifdef DEBUG
+  Serial.println("[CALLBACK] configPortalTimeoutCallback fired");
+  delay(100);
+#endif
+  ESP.restart();
+}
+
 void loop() {
   currentMillis = millis();
   client.loop();
@@ -343,6 +549,37 @@ void loop() {
     currentSetModeActive = true;
     blinkLed = true;
     turnON();
+#ifdef DEBUG
+    Serial.println("CurrentSetMode Active for 30s...");
+#endif
+  }
+
+  if(!wait_for_config && active_AP_mode && WiFi.status() == WL_CONNECTED) {
+    active_AP_mode = false;
+#ifdef DEBUG
+    Serial.println("WE HAVE WIFI!");
+    delay(1000);
+#endif
+    ESP.restart();  //Restart to get a clean start
+  }
+
+  wm.process();
+
+  if(force_AP_mode) {
+    force_AP_mode = false;
+    wait_for_config = true;
+    if(wm.getConfigPortalActive() == 0) {
+#ifdef DEBUG
+      Serial.println("Starting Config Portal");
+#endif
+      wm.startConfigPortal(newHostname.c_str());
+      active_AP_mode = true;
+      goToDeepSleep = false;
+    } else {
+#ifdef DEBUG
+      Serial.println("Config Portal allready running");
+#endif
+    }
   }
 
   if(currentSetModeActive) {
@@ -369,9 +606,9 @@ void loop() {
           }
           currentSetModeActive = false;
           blinkLed = false;
-          EEPROM.write(0, currentMode);
-          EEPROM.commit();
-          goToDeepSleep = true;
+          nvmPrefs.begin("thePrefs", false);
+          nvmPrefs.putUChar("currentMode", currentMode);
+          nvmPrefs.end();
         }
       }
     }
@@ -390,25 +627,29 @@ void loop() {
     digitalWrite(LED, LOW); //Static lit
   }
   
-  if ((goToDeepSleep || (currentMillis - startMillis >= max_runtime_ms)) && !currentSetModeActive && newButtonState) {
-    digitalWrite(LED, HIGH); //Turn off LED if left on..
+  if ((goToDeepSleep || (currentMillis - startMillis >= max_runtime_ms)) && !currentSetModeActive && newButtonState && !active_AP_mode) { 
     
     if (receivedMsg) {
       //release gpio before modification
       gpio_hold_dis((gpio_num_t) BUCK_EN);
     }
+    digitalWrite(LED, HIGH); //Turn off LED if left on..
     
     //preserve gpios during deep sleep
     gpio_hold_en((gpio_num_t) BUCK_EN);
     gpio_hold_en((gpio_num_t) HIGH_CUR);
     gpio_deep_sleep_hold_en();
 
-
+    uint64_t sleeptime_us = sleeptime_m*60*uS_TO_S_FACTOR;
 #ifdef DEBUG
     Serial.println("Enter deep sleep...");
-#endif
-    
+    Serial.print("Sleeptime(min): ");
+    Serial.println(sleeptime_m);
+    delay(1000);
     ESP.deepSleep(sleeptime_us);
+#else
+    ESP.deepSleep(sleeptime_us);
+#endif
   }
 }
 

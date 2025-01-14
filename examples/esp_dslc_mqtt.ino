@@ -3,7 +3,7 @@ FW for "Manges Mojäng" ESP32 Decor String Light Controller (esp_dslc)
 
 Variant: MQTT
 Requires: Home Assistant, MQTT Broker (Mosquitto), Automation in Home Assistant that triggers on MQTT Received message
-Version: 0.2
+Version: 0.3
 
 ***Concept***
 Wakes up each 10 min and connects to MQTT Broker to receive on/off decision
@@ -71,7 +71,7 @@ In Home Assistant:
 // Make sure "USB CDC On Boot" is Enabled if DEBUG is defined.
 // DEBUG mode will not work with power banks
 
-// #define DEBUG   
+//#define DEBUG   
 
 //###################################################
 
@@ -300,7 +300,7 @@ void setup() {
   new (&custom_mqtt_username) WiFiManagerParameter("username", "MQTT Username", mqtt_username, 20);
   new (&custom_mqtt_password) WiFiManagerParameter("password", "MQTT Password", mqtt_password, 20);
   new (&custom_mqtt_topic) WiFiManagerParameter("topic", "MQTT Output Topic", mqtt_topic, 40);
-  new (&custom_mqtt_status_topic) WiFiManagerParameter("topic", "MQTT Status Topic", mqtt_status_topic, 40);
+  new (&custom_mqtt_status_topic) WiFiManagerParameter("status_topic", "MQTT Status Topic", mqtt_status_topic, 40);
 
   wm.addParameter(&custom_mqtt_broker);
   wm.addParameter(&custom_mqtt_port);

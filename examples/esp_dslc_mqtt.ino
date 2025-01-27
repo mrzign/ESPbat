@@ -68,6 +68,9 @@ const uint8_t sleeptime_m = 10; //(10 min)
 const unsigned long button_exit_time_ms = 30000;    //Timeout after last button press at cold start
 const unsigned long max_runtime_ms = 5000;          //If no message from MQTT within 5s, go to DeepSleep after 5s
 
+#define ON  1
+#define OFF 0
+
 // Pins
 #define BUCK_EN   3 //RTC gpio (retained during deep sleep)
 #define HIGH_CUR  5 //RTC gpio (retained during deep sleep)
@@ -89,7 +92,7 @@ RTC_DATA_ATTR char mqtt_topic[40] = "esp_dslc_XXXX/output";
 RTC_DATA_ATTR char mqtt_status_topic[40] = "esp_dslc_XXXX/status";
 RTC_DATA_ATTR char mqtt_pbstatus_topic[40] = "esp_dslc_XXXX/pbstatus";
 RTC_DATA_ATTR bool mqtt_discovered = false;
-
+RTC_DATA_ATTR uint8_t output_state = OFF;
 
 //Variables
 bool cold_start = false;
@@ -465,10 +468,12 @@ void callback(char *topic, byte *payload, unsigned int length) {
 #endif
   mqtt_discovered = true;
   if ( topic_str == (String(mqtt_topic) + "/set").c_str() && (message == "ON" || message == "on")) {
+    if(client.connected() && output_state == OFF) client.publish(mqtt_topic, "ON");
     turnON();
     goToDeepSleep = true;
   }
-  if ( topic_str == (String(mqtt_topic) + "/set").c_str() && (message == "OFF" || message == "off")) {   
+  if ( topic_str == (String(mqtt_topic) + "/set").c_str() && (message == "OFF" || message == "off")) { 
+    if(client.connected() && output_state == ON) client.publish(mqtt_topic, "OFF");  
     turnOFF();
     goToDeepSleep = true;
   }
@@ -487,10 +492,12 @@ void callback(char *topic, byte *payload, unsigned int length) {
 
 void turnON() {
   digitalWrite(BUCK_EN, HIGH);
+  output_state = ON;
 }
 
 void turnOFF() {
   digitalWrite(BUCK_EN, LOW);
+  output_state = OFF;
 }
 
 void setCurrent(unsigned char mode) {

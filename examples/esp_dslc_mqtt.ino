@@ -3,7 +3,7 @@ FW for "Manges Mojäng" ESP32 Decor String Light Controller (esp_dslc)
 
 Variant: MQTT Auto
 Requires: Home Assistant, MQTT Broker (Mosquitto) with auto discovery (default)
-Version: 0.4
+Version: 0.5
 
 ***Concept***
 Wakes up each 10 min and connects to MQTT Broker to receive state of switch
@@ -25,8 +25,8 @@ Turns off output if no connection to wifi/mqtt occured, or received "off" state 
 ***At wake up***
 Connects to WiFi, then MQTT broker, take actions (on/off), then go to Sleep
 
-The device should automatically appear in Home Assistant as a device named "esp_dscl_XXXX" with two entities,
-one as a switch, one as a Power Bank status. Turn the switch on/off and the device will turn on/off within 10 minutes (when it wakes up).
+The device should automatically appear in Home Assistant as a device named "esp_dscl_XXXX" with 3 entities,
+one as a switch, one as a Power Bank status and one as a total time lit in minutes. Turn the switch on/off and the device will turn on/off within 10 minutes (when it wakes up).
 Preferrably have it set through an automation in Home Assistant (when sun goes down etc.).
 The Power Bank status reflects if the Power Bank is operational. If Power Bank is reported as Off, it will need charging.
 
@@ -53,6 +53,7 @@ In Home Assistant:
 #include <WiFiManager.h>  //WiFiManager by tzapu 2.0.17
 #include <PubSubClient.h> //PubSubClient by Nick O'Leary 2.8
 #include <ArduinoJson.h>  //ArduinoJson by Benoit Blanchon 7.3.0
+#include "time.h"
 #include "driver/gpio.h"
 #include "Preferences.h"
 
@@ -60,13 +61,16 @@ In Home Assistant:
 // Make sure "USB CDC On Boot" is Enabled if DEBUG is defined.
 // DEBUG mode will not work with power banks
 
-//#define DEBUG   
+// #define DEBUG   
 
 //###################################################
 
 const uint8_t sleeptime_m = 10; //(10 min)
 const unsigned long button_exit_time_ms = 30000;    //Timeout after last button press at cold start
 const unsigned long max_runtime_ms = 5000;          //If no message from MQTT within 5s, go to DeepSleep after 5s
+const char *ntpServer = "pool.ntp.org";
+const uint32_t gmtOffset_sec = 3600;
+const uint16_t daylightOffset_sec = 3600;
 
 #define ON  1
 #define OFF 0
@@ -91,8 +95,13 @@ RTC_DATA_ATTR uint16_t mqtt_port = 1883;
 RTC_DATA_ATTR char mqtt_topic[40] = "esp_dslc_XXXX/output";
 RTC_DATA_ATTR char mqtt_status_topic[40] = "esp_dslc_XXXX/status";
 RTC_DATA_ATTR char mqtt_pbstatus_topic[40] = "esp_dslc_XXXX/pbstatus";
+RTC_DATA_ATTR char mqtt_totlit_topic[40] = "esp_dslc_XXXX/totlit";
 RTC_DATA_ATTR bool mqtt_discovered = false;
 RTC_DATA_ATTR uint8_t output_state = OFF;
+RTC_DATA_ATTR uint8_t currentMode = 0;
+RTC_DATA_ATTR uint16_t total_time_lit_m = 0;
+RTC_DATA_ATTR uint16_t temp_time_lit_m = 0;
+RTC_DATA_ATTR time_t lit_since_s = 0;
 
 //Variables
 bool cold_start = false;
@@ -106,7 +115,6 @@ bool wait_for_config = false;
 uint8_t boot_up_reason = 0;
 uint8_t ledblink[8] = {0,1,1,1,1,1,1,1};
 uint8_t ledptr = 0;
-uint8_t currentMode = 0;
 uint16_t timeout = 0;
 uint16_t newButtonState = HIGH;
 uint32_t startMillis = 0;
@@ -123,9 +131,11 @@ WiFiManagerParameter custom_mqtt_topic;
 WiFiManagerParameter custom_mqtt_port;
 WiFiManagerParameter custom_mqtt_status_topic;
 WiFiManagerParameter custom_mqtt_pbstatus_topic;
+WiFiManagerParameter custom_mqtt_totlit_topic;
 WiFiManagerParameter custom_mac;
 char wm_mac[40];
 Preferences nvmPrefs;
+struct tm timeinfo;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -261,6 +271,12 @@ void setup() {
       nvmPrefs.putString("mqtt_pbstatus_topic", (newHostname + "/pbstatus"));
       strcpy(mqtt_pbstatus_topic, (newHostname + "/pbstatus").c_str());
     }
+    if(nvmPrefs.isKey("mqtt_totlit_topic")) {
+      strcpy(mqtt_totlit_topic, nvmPrefs.getString("mqtt_totlit_topic", mqtt_totlit_topic).c_str());
+    } else {
+      nvmPrefs.putString("mqtt_totlit_topic", (newHostname + "/totlit"));
+      strcpy(mqtt_totlit_topic, (newHostname + "/totlit").c_str());
+    }
     if(nvmPrefs.isKey("mqtt_port")) {
       mqtt_port = nvmPrefs.getUShort("mqtt_port", mqtt_port);
     } else {
@@ -283,6 +299,7 @@ void setup() {
   new (&custom_mqtt_topic) WiFiManagerParameter("topic", "MQTT Output Topic", mqtt_topic, 40);
   new (&custom_mqtt_status_topic) WiFiManagerParameter("status_topic", "MQTT Status Topic", mqtt_status_topic, 40);
   new (&custom_mqtt_pbstatus_topic) WiFiManagerParameter("pbstatus_topic", "MQTT Powerbank Status Topic", mqtt_pbstatus_topic, 40);
+  new (&custom_mqtt_totlit_topic) WiFiManagerParameter("totlit_topic", "MQTT Total Time Lit Topic", mqtt_totlit_topic, 40);
 
   wm.addParameter(&custom_mqtt_broker);
   wm.addParameter(&custom_mqtt_port);
@@ -291,6 +308,7 @@ void setup() {
   wm.addParameter(&custom_mqtt_topic);
   wm.addParameter(&custom_mqtt_status_topic);
   wm.addParameter(&custom_mqtt_pbstatus_topic);
+  wm.addParameter(&custom_mqtt_totlit_topic);  
   sprintf(wm_mac, "<hr><br>MAC: %s</br><br>", WiFi.macAddress().c_str());
   new (&custom_mac) WiFiManagerParameter(wm_mac);
   wm.addParameter(&custom_mac);
@@ -354,6 +372,10 @@ void setup() {
       client_id += String(WiFi.macAddress());
       timeout = 4; ////Timeout if not connected in 4*0.5s delay=2s
       while (!client.connected() && timeout > 0) {
+#ifndef DEBUG
+          //This is done to wake Powerbanks and control if the charging works (when using pbalive-dongle)
+          pinMode(PBWAKE, INPUT_PULLUP);
+#endif
 #ifdef DEBUG
         Serial.printf("The client %s connects to the mqtt broker", client_id.c_str());
         Serial.println("");
@@ -361,7 +383,78 @@ void setup() {
         if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
 #ifdef DEBUG
           Serial.println("mqtt broker connected");
+#endif 
+          if(!mqtt_discovered) {
+#ifdef DEBUG
+            Serial.println("Publish MQTT Auto Discover message");
 #endif
+            char buffer[512];
+            DynamicJsonDocument doc(512);
+            
+            doc.clear();
+            doc["name"] = "Switch";
+            doc["unique_id"] = newHostname + "_switch";
+            doc["state_topic"] = mqtt_topic;
+            doc["availability_topic"] = mqtt_status_topic;
+            doc["platform"] = "switch";
+            doc["optimistic"] = "true";
+            doc["command_topic"] = (String(mqtt_topic) + "/set").c_str();
+            doc["qos"] = "1";
+            doc["retain"] = "true";
+            doc["expire_after"] = "1220";
+
+            JsonObject device = doc.createNestedObject("device");
+            device["name"] = newHostname;
+            device["ids"] = newHostname;
+            device["mf"] = "mamoj";
+            device["mdl"] = "ESP Decor String Light Controller";
+            device["sw"] = "0.5";
+            device["hw"] = "1.0";       
+            serializeJson(doc, buffer);
+            Serial.println(buffer);
+            client.publish(("homeassistant/switch/" + newHostname + "/config").c_str(), buffer, true);
+            //client.publish(("homeassistant/switch/" + newHostname + "/config").c_str(), "");
+            
+            doc.clear();
+            doc["name"] = "Powerbank";
+            doc["unique_id"] = newHostname + "_pbstatus";
+            doc["state_topic"] = mqtt_pbstatus_topic;
+            doc["platform"] = "binary_sensor";
+            device = doc.createNestedObject("device");
+            device["name"] = newHostname;
+            device["ids"] = newHostname;
+            serializeJson(doc, buffer);
+            Serial.println(buffer);
+            client.publish(("homeassistant/binary_sensor/" + newHostname + "/config").c_str(), buffer);
+            //client.publish(("homeassistant/binary_sensor/" + newHostname + "/config").c_str(), "");
+            
+            doc.clear();
+            doc["name"] = "Total Time Lit";
+            doc["unique_id"] = newHostname + "_totlit";
+            doc["state_topic"] = mqtt_totlit_topic;
+            doc["platform"] = "sensor";
+            doc["unit_of_measurement"] = "h";
+            doc["device_class"] = "duration";
+            doc["value_template"] = "{{ value }}";
+            device = doc.createNestedObject("device");
+            device["name"] = newHostname;
+            device["ids"] = newHostname;
+            serializeJson(doc, buffer);
+            Serial.println(buffer);
+            client.publish(("homeassistant/sensor/" + newHostname + "/config").c_str(), buffer);
+            //client.publish(("homeassistant/sensor/" + newHostname + "/config").c_str(), "");
+            client.loop();
+          }
+          client.subscribe((String(mqtt_topic) + "/set").c_str(),1);
+          client.publish(mqtt_status_topic, "online");
+#ifndef DEBUG
+          if(digitalRead(PBWAKE)) {
+            client.publish(mqtt_pbstatus_topic, "OFF");
+          } else {
+            client.publish(mqtt_pbstatus_topic, "ON");
+          }
+          pinMode(PBWAKE, INPUT_PULLDOWN);
+#endif  
         } else {
 #ifdef DEBUG
           Serial.print("failed with state ");
@@ -371,87 +464,30 @@ void setup() {
           delay(500);
         }
       }
-
-      // publish and subscribe at MQTT Broker if connected
-      if (client.connected()) {
-        
-        if(!mqtt_discovered) {
+      if(timeout == 0) {
 #ifdef DEBUG
-          Serial.println("Publish MQTT Auto Discover message");
-#endif
-          char buffer[512];
-          DynamicJsonDocument doc(512);
-          doc.clear();
-
-          doc["name"] = "Switch";
-          doc["unique_id"] = newHostname + "_switch";
-          doc["state_topic"] = mqtt_topic;
-          doc["availability_topic"] = mqtt_status_topic;
-          doc["platform"] = "switch";
-          doc["optimistic"] = "true";
-          doc["command_topic"] = (String(mqtt_topic) + "/set").c_str();
-          doc["retain"] = true;
-          doc["expire_after"] = "1220";
-
-          JsonObject device = doc.createNestedObject("device");
-          device["name"] = newHostname;
-          device["ids"] = newHostname;
-          device["mf"] = "mamoj";
-          device["mdl"] = "ESP32C3";
-          device["sw"] = "0.4";
-          device["hw"] = "1.0";       
-          serializeJson(doc, buffer);
-          Serial.println(buffer);
-          client.publish(("homeassistant/switch/" + newHostname + "/config").c_str(), buffer, true);
-          //client.publish(("homeassistant/switch/" + newHostname + "/config").c_str(), "");
-          doc.clear();
-          
-          doc["name"] = "Powerbank";
-          doc["unique_id"] = newHostname + "_pbstatus";
-          doc["state_topic"] = mqtt_pbstatus_topic;
-          doc["availability_topic"] = mqtt_status_topic;
-          doc["platform"] = "binary_sensor";
-          doc["expire_after"] = "1220";
-          device = doc.createNestedObject("device");
-          device["name"] = newHostname;
-          device["ids"] = newHostname;
-          serializeJson(doc, buffer);
-          Serial.println(buffer);
-          client.publish(("homeassistant/binary_sensor/" + newHostname + "/config").c_str(), buffer, true);
-          //client.publish(("homeassistant/binary_sensor/" + newHostname + "/config").c_str(), "");
-          client.loop();
-        }
-        client.publish(mqtt_status_topic, "online");
-#ifndef DEBUG
-        //This is done to wake Powerbanks and control if the charging works (when using pbalive-dongle)
-        pinMode(PBWAKE, INPUT_PULLUP);
-        delay(10);
-        if(digitalRead(PBWAKE)) {
-          client.publish(mqtt_pbstatus_topic, "OFF");
-        } else {
-          client.publish(mqtt_pbstatus_topic, "ON");
-        }
-        pinMode(PBWAKE, INPUT_PULLDOWN);
-#endif
-        client.loop();
-        client.subscribe((String(mqtt_topic) + "/set").c_str(),1);
-        client.loop();
-        //delay(100);
-
-      } else {
-  #ifdef DEBUG
         Serial.println("failed connecting to mqtt server");
-  #endif
+#endif
+        if(!mqtt_discovered && (boot_up_reason == 1 || boot_up_reason == 12)) {
+          //wrong credentials?
+#ifdef DEBUG
+          Serial.println("Make a new attempt. Reset...");
+#endif
+          ESP.restart();
+        } else {
+          //failed connecting to mqtt. maybe broker is down? resend mqtt auto discovery next wake up
+#ifdef DEBUG
+          Serial.println("Send MQTT auto discovery next wake up...");
+#endif
+          mqtt_discovered = false;
+        }
         goToDeepSleep = true;
       }
     }
   }
-
-
   // Get some uptime timestamps initialized
   startMillis = millis();  //initial start time
   timeMillis = startMillis;
-
 }
 
 //MQTT callback. Runs when received a message from Broker
@@ -468,12 +504,35 @@ void callback(char *topic, byte *payload, unsigned int length) {
 #endif
   mqtt_discovered = true;
   if ( topic_str == (String(mqtt_topic) + "/set").c_str() && (message == "ON" || message == "on")) {
-    if(client.connected() && output_state == OFF) client.publish(mqtt_topic, "ON");
+    if(output_state == OFF || lit_since_s == 0) {
+      client.publish(mqtt_topic, "ON");
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);      
+      if (getLocalTime(&timeinfo)) {
+        time(&lit_since_s);
+      }
+    } else if (output_state == ON && lit_since_s > 0) {
+      temp_time_lit_m += sleeptime_m;      
+    }
+    client.publish(mqtt_totlit_topic, String(float(total_time_lit_m + temp_time_lit_m)/60, 2).c_str(), true); 
     turnON();
     goToDeepSleep = true;
   }
   if ( topic_str == (String(mqtt_topic) + "/set").c_str() && (message == "OFF" || message == "off")) { 
-    if(client.connected() && output_state == ON) client.publish(mqtt_topic, "OFF");  
+    if(output_state == ON) {
+      client.publish(mqtt_topic, "OFF");
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      time_t now = 0;   
+      if (getLocalTime(&timeinfo)) {
+        time(&now);
+        if(lit_since_s == 0){
+          total_time_lit_m = 0;
+        } else {
+          total_time_lit_m += (uint16_t)((now - lit_since_s) / 60);
+        }
+        temp_time_lit_m = 0;
+      }
+      client.publish(mqtt_totlit_topic, String(float(total_time_lit_m + temp_time_lit_m)/60, 2).c_str(), true); 
+    }
     turnOFF();
     goToDeepSleep = true;
   }
@@ -485,6 +544,8 @@ void callback(char *topic, byte *payload, unsigned int length) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
 #ifdef DEBUG
+    Serial.print("Total time lit (h): ");
+    Serial.println(String(float(total_time_lit_m + temp_time_lit_m)/60, 2).c_str());
     Serial.println("Disconnected from WiFi");
 #endif
   }
@@ -496,7 +557,7 @@ void turnON() {
 }
 
 void turnOFF() {
-  digitalWrite(BUCK_EN, LOW);
+  if(!currentSetModeActive) digitalWrite(BUCK_EN, LOW);
   output_state = OFF;
 }
 
@@ -551,6 +612,7 @@ void saveParamCallback(){
   strcpy(mqtt_topic, custom_mqtt_topic.getValue());
   strcpy(mqtt_status_topic, custom_mqtt_status_topic.getValue());
   strcpy(mqtt_pbstatus_topic, custom_mqtt_pbstatus_topic.getValue());
+  strcpy(mqtt_totlit_topic, custom_mqtt_totlit_topic.getValue());
 #ifdef DEBUG
   Serial.println("[CALLBACK] saveParamCallback fired");
   Serial.println("PARAM MQTT Broker = " + String(mqtt_broker));
@@ -560,6 +622,7 @@ void saveParamCallback(){
   Serial.println("PARAM MQTT Output Topic = " + String(mqtt_topic));
   Serial.println("PARAM MQTT Status Topic = " + String(mqtt_status_topic));
   Serial.println("PARAM MQTT PowerBank Status Topic = " + String(mqtt_pbstatus_topic));
+  Serial.println("PARAM MQTT Total Time Lit Topic = " + String(mqtt_totlit_topic));
 #endif
 
   nvmPrefs.begin("thePrefs", false);
@@ -570,6 +633,7 @@ void saveParamCallback(){
   nvmPrefs.putString("mqtt_topic", mqtt_topic);
   nvmPrefs.putString("mqtt_status_topic", mqtt_status_topic);
   nvmPrefs.putString("mqtt_pbstatus_topic", mqtt_status_topic);
+  nvmPrefs.putString("mqtt_totlit_topic", mqtt_totlit_topic);
   nvmPrefs.end();
   if(wait_for_config) {
     wait_for_config = false;
@@ -653,10 +717,10 @@ void loop() {
       } else {
         if(currentMillis - buttonReleaseMillis >= button_exit_time_ms) {
           //If no message from MQTT after button_exit_time, make sure to turn off and go to sleep.
-          if(!receivedMsg) {
+          currentSetModeActive = false;
+          if(!receivedMsg || output_state == OFF) {
             turnOFF();
           }
-          currentSetModeActive = false;
           blinkLed = false;
           nvmPrefs.begin("thePrefs", false);
           nvmPrefs.putUChar("currentMode", currentMode);
@@ -708,7 +772,4 @@ void loop() {
 void RTC_IRAM_ATTR esp_wake_deep_sleep(void) {
     esp_default_wake_deep_sleep();
     // Add additional functionality here
-    // if(wake_count > 0) {
-    //   wake_count--;
-    // }
 }

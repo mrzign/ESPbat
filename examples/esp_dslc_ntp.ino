@@ -3,7 +3,7 @@ FW for "Manges Mojäng" ESP32 Decor String Light Controller (esp_dslc)
 
 Variant: Timestamp
 Requires: Wifi
-Version: 0.2
+Version: 0.3
 
 ***Concept***
 Wakes up at a given time and turns on/off
@@ -41,7 +41,7 @@ Connects to WiFi, calibrates local time against NTP server, take actions (on/off
 
 const char *ntpServer = "pool.ntp.org";
 const uint32_t gmtOffset_sec = 3600;
-const uint16_t daylightOffset_sec = 3600;
+const uint16_t daylightOffset_sec = 0;
 
 const uint32_t button_exit_time_ms = 30000;    //Timeout after last button press at cold start
 
@@ -112,22 +112,6 @@ void setup() {
 #ifndef DEBUG
   //This is done to wake Powerbanks and control if the charging works (when using pbalive-dongle)
   pinMode(PBWAKE, INPUT_PULLUP);
-  int chargingDetect = digitalRead(PBWAKE);
-  pinMode(PBWAKE, INPUT_PULLDOWN);
-  // if(chargingDetect == 1) {
-  //   //No charging detected
-  //   ledblink[0] = 0;
-  //   ledblink[1] = 1;
-  //   ledblink[2] = 0;
-  //   ledblink[3] = 1;
-  //   ledblink[4] = 0;
-  //   ledblink[5] = 1;
-  //   ledblink[6] = 0;
-  //   ledblink[7] = 1;
-  //   led_blink_ms = 100; //Even faster blink  
-  //   blinkLed = true;
-  //   max_runtime_ms = 20000;        
-  // }
 #endif
 
   boot_up_reason = esp_rom_get_reset_reason(0);
@@ -344,12 +328,45 @@ uint16_t eval_time(void) {
   uint16_t timeOn_m = 0;
   uint16_t timeOff_m = 0;
   uint16_t timeNow_m = 0;
-  
+  bool dst = false;
+
   //Turn timestamps to minutes
   timeOn_m = timeSetOn_m + timeSetOn_h*60; 
   timeOff_m = timeSetOff_m + timeSetOff_h*60;
   timeNow_m = timeinfo.tm_min + timeinfo.tm_hour*60;
-  if(timeOff_m < timeOn_m) timeOff_m += 24*60;
+  
+
+//DST magic
+  uint8_t month, mday, d, n;
+  month = timeinfo.tm_mon + 1; // (0-11) + 1
+  mday = timeinfo.tm_mday;
+
+  d = (mday - timeinfo.tm_wday) % 7;  //First Sunday
+#ifdef DEBUG  
+  Serial.print("First Sunday: ");
+  Serial.println(d);
+#endif
+  n = (31 - d) / 7;
+  d = d + 7 * n;  //Last Sunday
+#ifdef DEBUG  
+  Serial.print("Last Sunday: ");
+  Serial.println(d);
+#endif
+
+  if((month > 3) && (month < 10)) {
+    dst = true;
+  } else if(month == 3) {
+    if (d < mday || (d == mday && timeinfo.tm_hour > 1)) dst = true;
+  } else if(month == 10) {
+    if(d > mday || (d == mday && timeinfo.tm_hour < 2)) dst = true;
+  }
+
+  if(dst) {
+    timeNow_m += 60;
+    if(timeNow_m >= 1440) timeNow_m -= 1440;
+  }
+
+
 
 #ifdef DEBUG  
   Serial.print("TimeOn: ");
@@ -358,15 +375,30 @@ uint16_t eval_time(void) {
   Serial.println(timeOff_m);
   Serial.print("TimeNow: ");
   Serial.println(timeNow_m);
+  Serial.print("DST: ");
+  Serial.println(dst);
 #endif
-  if(timeNow_m >= timeOn_m && timeNow_m < timeOff_m) {
-    //We are within time slot
-    sleep_m = (timeOff_m - timeNow_m);
-    outputState = ON;
+  if(timeOff_m > timeOn_m) {
+    if(timeNow_m >= timeOn_m && timeNow_m < timeOff_m) {
+      //We are within time slot
+      sleep_m = (timeOff_m - timeNow_m);
+      outputState = ON;
+    } else {
+      //We are outside time slot
+      sleep_m = (timeOn_m - timeNow_m);
+      outputState = OFF;
+    }
   } else {
-    //We are outside time slot
-    sleep_m = (timeOn_m - timeNow_m);
-    outputState = OFF;
+    if(timeNow_m >= timeOn_m || timeNow_m < timeOff_m) {
+      //We are within time slot
+      if(timeNow_m >= timeOn_m) sleep_m = (timeOff_m+24*60 - timeNow_m);
+      if(timeNow_m < timeOff_m) sleep_m = (timeOff_m - timeNow_m);
+      outputState = ON;
+    } else {
+      //We are outside time slot
+      sleep_m = (timeOn_m - timeNow_m);
+      outputState = OFF;
+    }
   }
   return sleep_m;
 }
@@ -554,7 +586,7 @@ void loop() {
   } else {
     digitalWrite(LED, LOW); //Static lit
   }
-  
+
   if (goToDeepSleep && !currentSetModeActive && newButtonState) {
     //Set the output to correct state
     if(receivedTime) {
@@ -570,6 +602,12 @@ void loop() {
     gpio_hold_en((gpio_num_t) BUCK_EN);
     gpio_hold_en((gpio_num_t) HIGH_CUR);
     gpio_deep_sleep_hold_en();
+
+#ifndef DEBUG
+	//This is done to wake Powerbanks and control if the charging works (when using pbalive-dongle)
+	pinMode(PBWAKE, INPUT_PULLDOWN);
+#endif
+
 
     if(sleeptime_m < 1) sleeptime_m = 1;
     if(sleeptime_m > 60) sleeptime_m = 60;

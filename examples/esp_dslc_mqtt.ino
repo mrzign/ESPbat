@@ -3,7 +3,7 @@ FW for "Manges Mojäng" ESP32 Decor String Light Controller (esp_dslc)
 
 Variant: MQTT Auto
 Requires: Home Assistant, MQTT Broker (Mosquitto) with auto discovery (default)
-Version: 0.5
+Version: 0.6
 
 ***Concept***
 Wakes up each 10 min and connects to MQTT Broker to receive state of switch
@@ -353,6 +353,7 @@ void setup() {
 #ifdef DEBUG
       Serial.println("Failed connecting to WiFi!");
 #endif
+      mqtt_discovered = false;
       goToDeepSleep = true;
     }
   } else {
@@ -408,7 +409,7 @@ void setup() {
             device["ids"] = newHostname;
             device["mf"] = "mamoj";
             device["mdl"] = "ESP Decor String Light Controller";
-            device["sw"] = "0.5";
+            device["sw"] = "0.6";
             device["hw"] = "1.0";       
             serializeJson(doc, buffer);
             Serial.println(buffer);

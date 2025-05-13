@@ -3,7 +3,7 @@ FW for "Manges Mojäng" ESP32 Decor String Light Controller (esp_dslc)
 
 Variant: MQTT Auto
 Requires: Home Assistant, MQTT Broker (Mosquitto) with auto discovery (default)
-Version: 0.6
+Version: 0.7
 
 ***Concept***
 Wakes up each 10 min and connects to MQTT Broker to receive state of switch
@@ -353,9 +353,9 @@ void setup() {
 #ifdef DEBUG
       Serial.println("Failed connecting to WiFi!");
 #endif
-      mqtt_discovered = false;
       goToDeepSleep = true;
     }
+    mqtt_discovered = false;
   } else {
 #ifdef DEBUG
     Serial.println("Connected to WiFi");
@@ -409,7 +409,7 @@ void setup() {
             device["ids"] = newHostname;
             device["mf"] = "mamoj";
             device["mdl"] = "ESP Decor String Light Controller";
-            device["sw"] = "0.6";
+            device["sw"] = "0.7";
             device["hw"] = "1.0";       
             serializeJson(doc, buffer);
             Serial.println(buffer);
@@ -469,7 +469,7 @@ void setup() {
 #ifdef DEBUG
         Serial.println("failed connecting to mqtt server");
 #endif
-        if(!mqtt_discovered && (boot_up_reason == 1 || boot_up_reason == 12)) {
+        if(!mqtt_discovered && (boot_up_reason == 1)) {
           //wrong credentials?
 #ifdef DEBUG
           Serial.println("Make a new attempt. Reset...");
@@ -653,6 +653,7 @@ void configPortalTimeoutCallback() {
 #ifdef DEBUG
   Serial.println("[CALLBACK] configPortalTimeoutCallback fired");
   delay(100);
+
 #endif
   ESP.restart();
 }
@@ -744,7 +745,7 @@ void loop() {
     digitalWrite(LED, LOW); //Static lit
   }
   
-  if ((goToDeepSleep || (currentMillis - startMillis >= max_runtime_ms)) && !currentSetModeActive && newButtonState && !active_AP_mode && mqtt_discovered) { 
+  if ((goToDeepSleep || (currentMillis - startMillis >= max_runtime_ms)) && !currentSetModeActive && newButtonState && !active_AP_mode) { 
     if (receivedMsg) {
       //release gpio before modification
       gpio_hold_dis((gpio_num_t) BUCK_EN);
